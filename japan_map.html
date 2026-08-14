@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Japan WAJA & Grid Progress Map</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; width: 100%; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #map { height: 100%; width: 100%; }
+        
+        #loader-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.75); z-index: 10000;
+            display: flex; justify-content: center; align-items: center;
+        }
+        .upload-card {
+            background: white; padding: 30px; border-radius: 10px; text-align: center;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3); max-width: 450px; width: 90%;
+        }
+        .upload-card h2 { margin-top: 0; color: #1b5e20; }
+        .upload-card input { margin: 15px 0; width: 100%; }
+        .upload-card p { font-size: 13px; color: #666; }
+
+        #controls-container {
+            position: absolute; top: 15px; left: 50px; z-index: 999;
+            background: rgba(255, 255, 255, 0.95); padding: 12px 20px;
+            border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            display: flex; flex-direction: column; gap: 8px; display: none;
+        }
+        .control-title-area {
+            display: flex; justify-content: space-between; align-items: center;
+            border-bottom: 1px solid #ddd; padding-bottom: 5px;
+        }
+        .control-title { font-weight: bold; font-size: 14px; color: #222; }
+        .badge {
+            background: #1b5e20; color: white; padding: 2px 8px;
+            border-radius: 12px; font-size: 12px; font-weight: bold;
+        }
+        .button-group { display: flex; gap: 4px; flex-wrap: wrap; max-width: 550px; }
+        .band-btn {
+            background: #ffffff; border: 1px solid #cccccc; padding: 6px 12px;
+            font-size: 12px; font-weight: 600; cursor: pointer; border-radius: 4px;
+            transition: all 0.2s ease; color: #444;
+        }
+        .band-btn:hover { background: #f0f0f0; border-color: #888; }
+        .band-btn.active { background: #2e7d32; color: white; border-color: #1b5e20; }
+        .view-mode-toggle {
+            margin-top: 5px; background: #e8f5e9; border: 1px solid #c8f7dc; color: #1b5e20;
+            padding: 5px 10px; font-weight: bold; cursor: pointer; border-radius: 4px; font-size: 12px; text-align: center;
+        }
+        .view-mode-toggle:hover { background: #c8f7dc; }
+    </style>
+</head>
+<body>
+
+    <div id="loader-overlay">
+        <div class="upload-card">
+            <h2>Japan Ham Progress Map</h2>
+            <p>1. Select your ADIF log file (e.g. <b>lotwreport.adi</b>):</p>
+            <input type="file" id="adifFileInput" accept=".adi,.txt">
+            <p>2. Select your local <b>japan.geojson</b> file:</p>
+            <input type="file" id="geojsonFileInput" accept=".geojson,.json">
+            <p style="font-size: 11px; color: #888; margin-top:10px;">Everything is processed locally in your browser.</p>
+        </div>
+    </div>
+
+    <div id="controls-container">
+        <div class="control-title-area">
+            <span class="control-title" id="mode-title">Japan WAJA Progress (Prefectures)</span>
+            <span id="active-stat-badge" class="badge">0 / 47</span>
+        </div>
+        <div class="button-group" id="button-group-container"></div>
+        <div class="view-mode-toggle" id="toggleModeBtn" onclick="toggleViewMode()">Switch to: Grid Fields View</div>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const targetBands = ['160m', '80m', '40m', '30m', '20m', '17m', '15m', '12m', '10m', '6m'];
+        
+        let map = L.map('map', {zoomControl: true}).setView([36.2048, 138.2529], 5);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/positron/{z}/{x}/{y}{r}.png', {
+            maxZoom: 18,
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+        }).addTo(map);
+
+        let bandPrefDetails = {};
+        let bandGridDetails = {};
+        targetBands.forEach(b => {
+            bandPrefDetails[b] = {};
+            bandGridDetails[b] = {};
+        });
+
+        let japanGeojsonRaw = null;
+        let currentBand = 'total';
+        let currentView = 'waja';
+        
+        let activeGeoJsonLayer = null;
+        let gridLayersGroup = L.layerGroup().addTo(map);
+
+        let adifLoaded = false;
+        let geojsonLoaded = false;
+
+        document.getElementById('adifFileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                parseAdif(evt.target.result);
+                adifLoaded = true;
+                checkReady();
+            };
+            reader.readAsText(file);
+        });
+
+        document.getElementById('geojsonFileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                try {
+                    japanGeojsonRaw = JSON.parse(evt.target.result);
+                    geojsonLoaded = true;
+                    checkReady();
+                } catch(err) {
+                    alert("Error parsing GeoJSON file!");
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        function checkReady() {
+            if (adifLoaded && geojsonLoaded) {
+                document.getElementById('loader-overlay').style.display = 'none';
+                document.getElementById('controls-container').style.display = 'flex';
+                buildUI();
+                renderMap();
+            }
+        }
+
+        function parseAdif(text) {
+            const records = text.split(/<eor>/i);
+            records.forEach(record => {
+                const dxccMatch = record.match(/<dxcc:(\d+)>([^<]+)/i);
+                const countryMatch = record.match(/<country:(\d+)>([^<]+)/i);
+                
+                const isJapan = (dxccMatch && dxccMatch[2].trim() === "339") || 
+                                (countryMatch && countryMatch[2].trim().toUpperCase() === "JAPAN");
+                
+                if (!isJapan) return;
+
+                const bandMatch = record.match(/<band:(\d+)>([^<]+)/i);
+                if (!bandMatch) return;
+                let band = bandMatch[2].trim().toLowerCase();
+                if (!targetBands.includes(band)) return;
+
+                const stateMatch = record.match(/<state:(\d+)>([^<]+)/i);
+                const gridMatch = record.match(/<gridsquare:(\d+)>([^<]+)/i);
+                const callMatch = record.match(/<call:(\d+)>([^<]+)/i);
+
+                let state = stateMatch ? stateMatch[2].trim() : "";
+                let grid = gridMatch ? gridMatch[2].trim().toUpperCase() : "";
+                let callsign = callMatch ? callMatch[2].trim().toUpperCase() : "";
+                let contact_info = grid.length >= 4 ? `${callsign} (${grid.substring(0,4)})` : callsign;
+
+                if (grid.length >= 4) {
+                    let quad4 = grid.substring(0, 4);
+                    if (!bandGridDetails[band][quad4]) bandGridDetails[band][quad4] = new Set();
+                    bandGridDetails[band][quad4].add(callsign);
+                }
+
+                if (state !== "") {
+                    // Podržava i numerički zapis i oznake poput JP-01 ili slično
+                    let cleanState = state.replace(/\D/g, "");
+                    if (cleanState !== "") {
+                        let isoCode = String(parseInt(cleanState, 10)).padStart(2, '0');
+                        if (!bandPrefDetails[band][isoCode]) bandPrefDetails[band][isoCode] = new Set();
+                        bandPrefDetails[band][isoCode].add(contact_info);
+                    }
+                }
+            });
+        }
+
+        function extractPrefectureIso(properties) {
+            // Proširena lista mogućih naziva polja u GeoJSON-u za prefekture
+            const possibleCols = ['id', 'ISO', 'ISO_1', 'ISO_3166_2', 'code', 'pref', 'pref_code', 'HASC_1', 'cartodb_id', 'JIS_CODE'];
+            let rawVal = "";
+            for (let c of possibleCols) {
+                if (properties[c] !== undefined && properties[c] !== null && properties[c] !== "") {
+                    rawVal = String(properties[c]);
+                    break;
+                }
+            }
+            // Izvlačenje brojeva iz vrijednosti (npr. iz "JP-13" ili direktno broja)
+            let digits = rawVal.replace(/\D/g, "");
+            if (digits.length > 0) {
+                let num = parseInt(digits.slice(-2), 10);
+                if (!isNaN(num)) return String(num).padStart(2, '0');
+            }
+            return rawVal.trim().padStart(2, '0');
+        }
+
+        function getAggregatedData(band, type) {
+            let targetMap = (type === 'waja') ? bandPrefDetails : bandGridDetails;
+            let aggregated = {};
+            
+            if (band === 'total') {
+                targetBands.forEach(b => {
+                    let bData = targetMap[b];
+                    for (let key in bData) {
+                        if (!aggregated[key]) aggregated[key] = new Set();
+                        bData[key].forEach(item => aggregated[key].add(item));
+                    }
+                });
+            } else {
+                let bData = targetMap[band];
+                for (let key in bData) {
+                    aggregated[key] = new Set(bData[key]);
+                }
+            }
+            return aggregated;
+        }
+
+        function buildUI() {
+            let html = `<button class="band-btn total-btn active" onclick="switchBand('total')">TOTAL</button>`;
+            targetBands.forEach(b => {
+                html += `<button class="band-btn" id="btn-${b}" onclick="switchBand('${b}')">${b.toUpperCase()}</button>`;
+            });
+            document.getElementById('button-group-container').innerHTML = html;
+        }
+
+        function switchBand(band) {
+            currentBand = band;
+            document.querySelectorAll('.band-btn').forEach(btn => btn.classList.remove('active'));
+            if (band === 'total') {
+                document.querySelector('.total-btn').classList.add('active');
+            } else {
+                document.getElementById('btn-' + band).classList.add('active');
+            }
+            renderMap();
+        }
+
+        function toggleViewMode() {
+            currentView = (currentView === 'waja') ? 'grids' : 'waja';
+            document.getElementById('toggleModeBtn').innerText = currentView === 'waja' ? "Switch to: Grid Fields View" : "Switch to: WAJA (Prefectures) View";
+            document.getElementById('mode-title').innerText = currentView === 'waja' ? "Japan WAJA Progress (Prefectures)" : "Japan Grid Fields Progress";
+            renderMap();
+        }
+
+        function renderMap() {
+            gridLayersGroup.clearLayers();
+            if (activeGeoJsonLayer) {
+                map.removeLayer(activeGeoJsonLayer);
+            }
+
+            if (currentView === 'waja') {
+                renderWajaMap();
+            } else {
+                renderGridsMap();
+            }
+        }
+
+        function renderWajaMap() {
+            let data = getAggregatedData(currentBand, 'waja');
+            let workedCount = Object.keys(data).length;
+            document.getElementById('active-stat-badge').innerText = `${workedCount} / 47 Prefectures`;
+
+            activeGeoJsonLayer = L.geoJson(japanGeojsonRaw, {
+                style: function(feature) {
+                    let iso = extractPrefectureIso(feature.properties);
+                    let isWorked = data[iso] && data[iso].size > 0;
+                    return {
+                        fillColor: isWorked ? '#90ee90' : '#e8e8e8',
+                        color: '#ffffff',
+                        weight: 1.0,
+                        fillOpacity: isWorked ? 0.65 : 0.40
+                    };
+                },
+                onEachFeature: function(feature, layer) {
+                    let props = feature.properties;
+                    let iso = extractPrefectureIso(props);
+                    
+                    let nameCols = ['name', 'nam', 'name_1', 'pref_name', 'NAME_1', 'nam_ja'];
+                    let prefName = iso;
+                    for (let c of nameCols) { if (props[c]) { prefName = props[c]; break; } }
+
+                    let workedSet = data[iso];
+                    let html = `<div style='max-height: 200px; overflow-y: auto; min-width: 180px; font-family: sans-serif;'>`;
+                    html += `<b>${prefName}</b> (ISO: ${iso})<br>`;
+                    if (workedSet && workedSet.size > 0) {
+                        let sortedList = Array.from(workedSet).sort();
+                        html += `Status: <span style='color: #1e7e34; font-weight: bold;'>WORKED</span><br>`;
+                        html += `Total QSOs: <b>${sortedList.length}</b><br><hr style='margin: 5px 0;'>`;
+                        html += `<span style='font-size: 11px; color: #444;'>${sortedList.join('<br>')}</span>`;
+                    } else {
+                        html += `Status: <span style='color: #a94442;'>Not worked</span>`;
+                    }
+                    html += `</div>`;
+                    layer.bindTooltip(html, {sticky: true});
+                }
+            }).addTo(map);
+        }
+
+        function coordsToLocator4(lon, lat) {
+            lon += 180; lat += 90;
+            let field_lon = String.fromCharCode(Math.floor(lon / 20) + 65);
+            let field_lat = String.fromCharCode(Math.floor(lat / 10) + 65);
+            let square_lon = Math.floor((lon % 20) / 2);
+            let square_lat = Math.floor(lat % 10);
+            return `${field_lon}${field_lat}${square_lon}${square_lat}`;
+        }
+
+        function renderGridsMap() {
+            let data = getAggregatedData(currentBand, 'grids');
+            let workedCount = Object.keys(data).length;
+            document.getElementById('active-stat-badge').innerText = `${workedCount} Worked Grids`;
+
+            for (let lon_start = 122; lon_start < 148; lon_start += 2) {
+                for (let lat_start = 23; lat_start < 47; lat_start += 1) {
+                    let top_left = [lat_start + 1, lon_start];
+                    let top_right = [lat_start + 1, lon_start + 2];
+                    let bottom_right = [lat_start, lon_start + 2];
+                    let bottom_left = [lat_start, lon_start];
+
+                    let center_lat = lat_start + 0.5;
+                    let center_lon = lon_start + 1.0;
+                    let grid_name = coordsToLocator4(center_lon, center_lat);
+
+                    let stations = data[grid_name];
+                    let isWorked = stations && stations.size > 0;
+
+                    let tooltipHtml = `<div style='font-family: sans-serif; max-height: 150px; overflow-y: auto;'><b>Grid Field: ${grid_name}</b><br>`;
+                    if (isWorked) {
+                        let sortedList = Array.from(stations).sort();
+                        tooltipHtml += `Status: <span style='color: green; font-weight: bold;'>WORKED</span><br>Total Stations: <b>${sortedList.length}</b><br><hr style='margin:4px 0;'><span style='font-size:10px; color:#555;'>${sortedList.join('<br>')}</span>`;
+                    } else {
+                        tooltipHtml += `Status: <span style='color: red;'>Not worked</span>`;
+                    }
+                    tooltipHtml += `</div>`;
+
+                    let poly = L.polygon([bottom_left, bottom_right, top_right, top_left], {
+                        color: "#444444",
+                        weight: 0.7,
+                        fill: true,
+                        fillColor: isWorked ? '#90ee90' : '#ffcccc',
+                        fillOpacity: isWorked ? 0.5 : 0.35,
+                        opacity: 0.3
+                    }).bindTooltip(tooltipHtml, {sticky: true});
+
+                    gridLayersGroup.addLayer(poly);
+
+                    let marker = L.marker([center_lat, center_lon], {
+                        icon: L.divIcon({
+                            className: 'grid-label',
+                            html: `<div style='font-size: 8px; color: #333333; font-family: monospace; font-weight: bold; text-align: center; white-space: nowrap;'>${grid_name}</div>`
+                        }),
+                        interactive: false
+                    });
+                    gridLayersGroup.addLayer(marker);
+                }
+            }
+        }
+    </script>
+</body>
+</html>
