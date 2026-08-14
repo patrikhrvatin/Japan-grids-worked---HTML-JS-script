@@ -1,5 +1,3 @@
-Evo kratkog i jasnog uputstva za `README.md` datoteku vašeg projekta:
-
 ---
 
 ## Japan WAJA & Grid Progress Map
